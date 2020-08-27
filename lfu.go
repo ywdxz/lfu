@@ -86,7 +86,7 @@ func (c *cache) Set(k string, v interface{}) {
 
 func (c *cache) set(k string, v interface{}) {
 
-	if c.cap == 0 {
+	if c.cap <= 0 {
 		return
 	}
 
