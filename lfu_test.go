@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestLFU(t *testing.T) {
+func TestLFU_1(t *testing.T) {
 	cache := New(2)
 
 	cache.Set("a", 1)
@@ -42,7 +42,7 @@ func TestLFU(t *testing.T) {
 	assert.Equal(t, 0, cache.Size())
 }
 
-func TestCache_Set(t *testing.T) {
+func TestLFU_2(t *testing.T) {
 	cache := &cache{
 		cap:      2,
 		kv:       make(map[string]*kvItem),
@@ -95,7 +95,7 @@ func TestCache_Set(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestCache_Get(t *testing.T) {
+func TestLFU_3(t *testing.T) {
 	cache := &cache{
 		kv:       make(map[string]*kvItem),
 		freqList: list.New(),
@@ -120,7 +120,7 @@ func TestCache_Get(t *testing.T) {
 
 }
 
-func TestCache_Size(t *testing.T) {
+func TestLFU_4(t *testing.T) {
 	cache := &cache{
 		kv:       make(map[string]*kvItem),
 		freqList: list.New(),
