@@ -1,20 +1,98 @@
 package lfu
 
-import (
-	"container/list"
-	"sync"
-)
-
-var (
-	placeholder = byte(0)
-)
-
 type LFU interface {
 	Set(k string, v interface{})
 	Get(k string) (v interface{}, ok bool)
-	Evict(n int)
-	Size() int
-	// Print()
+}
+
+type listNode struct {
+	key        string
+	value      interface{}
+	prev, next *listNode
+	count      int
+}
+
+type twoWayList struct {
+	head, tail *listNode
+	len        int
+}
+
+func (t *twoWayList) addToHead(cur *listNode) {
+	switch {
+	case t.len == 0:
+		t.head = cur
+		t.tail = cur
+		t.len = 1
+	default:
+		t.head.prev = cur
+		cur.next = t.head
+		t.head = cur
+		t.len++
+	}
+}
+
+func (t *twoWayList) delNode(cur *listNode) {
+	switch {
+	case t.len == 0:
+	case t.len == 1:
+		t.head = nil
+		t.tail = nil
+		t.len = 0
+		cur.next = nil
+		cur.prev = nil
+	case cur == t.head:
+		t.head = t.head.next
+		t.head.prev = nil
+		t.len--
+		cur.next = nil
+		cur.prev = nil
+	case cur == t.tail:
+		t.tail = t.tail.prev
+		t.tail.next = nil
+		t.len--
+		cur.next = nil
+		cur.prev = nil
+	default:
+		cur.next.prev = cur.prev
+		cur.prev.next = cur.next
+		t.len--
+		cur.next = nil
+		cur.prev = nil
+	}
+}
+
+func (t *twoWayList) delTailNode() (node *listNode) {
+	node = t.tail
+	switch {
+	case t.len == 0:
+	case t.len == 1:
+		t.head = nil
+		t.tail = nil
+		t.len = 0
+		node.prev = nil
+		node.next = nil
+	default:
+		t.tail = t.tail.prev
+		t.tail.next = nil
+		t.len--
+		node.prev = nil
+		node.next = nil
+	}
+	return
+}
+
+func (t *twoWayList) ifEmpty() bool {
+	if t.len <= 0 {
+		return true
+	}
+	return false
+}
+
+type lfuCache struct {
+	cap, len int
+	hash1    map[string]*listNode
+	hash2    map[int]*twoWayList
+	minCount int
 }
 
 func New(cap int) LFU {
@@ -23,184 +101,88 @@ func New(cap int) LFU {
 		cap = 0
 	}
 
-	return &cache{
+	return &lfuCache{
 		cap:      cap,
-		kv:       make(map[string]*kvItem, cap),
-		freqList: list.New(),
+		len:      0,
+		minCount: 0,
+		hash1:    make(map[string]*listNode, cap),
+		hash2:    make(map[int]*twoWayList, cap),
 	}
 }
 
-type kvItem struct {
-	k      string
-	v      interface{}
-	parent *list.Element
-}
+func (l *lfuCache) updateNode(cur *listNode) {
 
-type freqNode struct {
-	freq  int
-	items map[*kvItem]interface{}
-}
+	li, _ := l.hash2[cur.count]
 
-type cache struct {
-	sync.Mutex
-	cap      int
-	kv       map[string]*kvItem
-	freqList *list.List
-}
+	li.delNode(cur)
 
-func (c *cache) increment(item *kvItem) {
-
-	//only update freqList
-	if item == nil || item.parent == nil {
-		return
-	}
-
-	cur := item.parent
-	curNode := cur.Value.(*freqNode)
-
-	if cur.Next() == nil || curNode.freq+1 != cur.Next().Value.(*freqNode).freq {
-
-		item.parent = c.freqList.InsertAfter(&freqNode{
-			freq:  curNode.freq + 1,
-			items: map[*kvItem]interface{}{item: placeholder},
-		}, cur)
-
-	} else {
-		nextNode := cur.Next().Value.(*freqNode)
-		nextNode.items[item] = placeholder
-	}
-
-	delete(curNode.items, item)
-	if len(curNode.items) == 0 {
-		c.freqList.Remove(cur)
-	}
-	return
-}
-
-func (c *cache) Set(k string, v interface{}) {
-	c.Mutex.Lock()
-	c.set(k, v)
-	c.Mutex.Unlock()
-	return
-}
-
-func (c *cache) set(k string, v interface{}) {
-
-	if c.cap <= 0 {
-		return
-	}
-
-	if vv, ok := c.kv[k]; ok {
-		//old
-		vv.v = v
-		c.increment(vv)
-		return
-	}
-
-	if c.cap < len(c.kv)+1 {
-		c.evict(len(c.kv) + 1 - c.cap)
-	}
-
-	var item *kvItem
-	//new
-	front := c.freqList.Front()
-	if front == nil || front.Value.(*freqNode).freq != 1 {
-		item = &kvItem{
-			k: k,
-			v: v,
+	if li.ifEmpty() {
+		delete(l.hash2, cur.count)
+		if l.minCount == cur.count {
+			l.minCount++
 		}
-		node := &freqNode{
-			freq:  1,
-			items: map[*kvItem]interface{}{item: placeholder},
-		}
-		c.freqList.PushFront(node)
-		item.parent = c.freqList.Front()
-	} else {
-		node := c.freqList.Front()
-		item = &kvItem{
-			k:      k,
-			v:      v,
-			parent: node,
-		}
-		node.Value.(*freqNode).items[item] = placeholder
 	}
-	c.kv[item.k] = item
-	return
-}
 
-func (c *cache) Get(k string) (v interface{}, ok bool) {
-	c.Mutex.Lock()
-	v, ok = c.get(k)
-	c.Mutex.Unlock()
+	cur.count++
 
-	return
-}
-
-func (c *cache) get(k string) (v interface{}, ok bool) {
-
-	item, ok := c.kv[k]
+	li, ok := l.hash2[cur.count]
 	if !ok {
+		li = &twoWayList{}
+		l.hash2[cur.count] = li
+	}
+	li.addToHead(cur)
+}
+
+// eliminateNode 未更新 lfuCache.count
+func (l *lfuCache) eliminateNode() {
+	li, _ := l.hash2[l.minCount]
+	v := li.delTailNode()
+	delete(l.hash1, v.key)
+	if li.ifEmpty() {
+		delete(l.hash2, v.count)
+	}
+	l.len--
+}
+
+func (l *lfuCache) addNewNode(cur *listNode) {
+	cur.count = 1
+	l.hash1[cur.key] = cur
+	li, ok := l.hash2[cur.count]
+	if !ok {
+		li = &twoWayList{}
+		l.hash2[cur.count] = li
+	}
+	li.addToHead(cur)
+	l.minCount = cur.count
+	l.len++
+}
+
+func (l *lfuCache) Set(k string, v interface{}) {
+
+	if l.cap <= 0 {
 		return
 	}
 
-	c.increment(item)
-	v = item.v
-	return
-}
-
-func (c *cache) Evict(n int) {
-	c.Mutex.Lock()
-	c.evict(n)
-	c.Mutex.Unlock()
-	return
-}
-
-func (c *cache) evict(n int) {
-
-	for c.freqList.Len() > 0 && n > 0 {
-		front := c.freqList.Front()
-		frontNode := front.Value.(*freqNode)
-
-		for item := range frontNode.items {
-			if n <= 0 {
-				break
-			}
-			delete(frontNode.items, item)
-			delete(c.kv, item.k)
-			n--
-		}
-
-		if len(frontNode.items) == 0 {
-			c.freqList.Remove(front)
-		}
+	if v, ok := l.hash1[k]; ok {
+		v.value = v
+		l.updateNode(v)
+		return
 	}
-	return
+
+	if l.len == l.cap {
+		l.eliminateNode()
+	}
+
+	l.addNewNode(&listNode{
+		key:   k,
+		value: v,
+	})
 }
 
-func (c *cache) Size() (n int) {
-	c.Mutex.Lock()
-	n = c.size()
-	c.Mutex.Unlock()
-	return
+func (l *lfuCache) Get(k string) (v interface{}, ok bool) {
+	if v, ok := l.hash1[k]; ok {
+		l.updateNode(v)
+		return v.value, true
+	}
+	return nil, false
 }
-
-func (c *cache) size() (n int) {
-	n = len(c.kv)
-	return
-}
-
-// func (c *cache) Print() {
-// 	c.Mutex.Lock()
-// 	defer c.Mutex.Unlock()
-
-// 	for e := c.freqList.Front(); e != nil; e = e.Next() {
-// 		node := e.Value.(*freqNode)
-// 		fmt.Printf("[ %d - ", node.freq)
-
-// 		for ite := range node.items {
-// 			fmt.Printf("%+v,%+v ", ite.k, ite.v)
-// 		}
-// 		fmt.Printf("]\n")
-// 	}
-// 	return
-// }
